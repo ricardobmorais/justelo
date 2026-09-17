@@ -87,10 +87,17 @@ def load_baseline():
 
 
 def load_fixture_csv(comp):
-    path = BASE_DIR / "fixtures_csv" / f"{comp}.csv"
-    df = pd.read_csv(path, encoding="utf-8-sig")
+    df = load_fixture_csv_raw(comp)
     df["Date"] = pd.to_datetime(df["Date"], format="%d/%m/%Y %H:%M", errors="coerce")
     return df
+
+
+def load_fixture_csv_raw(comp):
+    """Lê o CSV de fixtures tal como está em disco, sem qualquer filtragem
+    (usado pelas classificações/simulação, que precisam da época toda,
+    não só dos jogos depois do corte do baseline)."""
+    path = BASE_DIR / "fixtures_csv" / f"{comp}.csv"
+    return pd.read_csv(path, encoding="utf-8-sig")
 
 
 def build_repository():
@@ -151,11 +158,16 @@ def build_repository():
     }
 
 
+def load_full_history():
+    """Carrega o histórico completo (todas as colunas relevantes), para uso pelo
+    modelo de Poisson e para qualquer análise futura (forma, Elo externo, HT, etc.)."""
+    hist = pd.read_csv(BASE_DIR / "data_repo" / "data" / "Matches_extended.csv", parse_dates=["MatchDate"], low_memory=False)
+    return hist.dropna(subset=["FTHome", "FTAway"]).sort_values("MatchDate").reset_index(drop=True)
+
+
 def get_poisson_model():
     """Treina o modelo de Poisson com o NOSSO Elo (já provado melhor que o externo)."""
-    hist = pd.read_csv(BASE_DIR / "data_repo" / "data" / "Matches.csv", usecols=[
-        "MatchDate", "HomeTeam", "AwayTeam", "FTHome", "FTAway"
-    ], parse_dates=["MatchDate"]).dropna(subset=["FTHome", "FTAway"]).sort_values("MatchDate").reset_index(drop=True)
+    hist = load_full_history()
     _, pre_h, pre_a = run_elo(hist, k=15, home_adv=40)
     hist["EloDiff"] = pre_h - pre_a
     return fit_goal_model(hist)
@@ -170,12 +182,10 @@ def predict_match(model, elo_home, elo_away):
     return {"mu_h": mu_h, "mu_a": mu_a, **probs}
 
 
-
-    repo = build_repository()
-    print(f"Corte do baseline: {repo['baseline_cutoff']}")
-    print(f"Jogos já refletidos no baseline (descartados): {repo['jogos_descartados_ja_no_baseline']}")
-    print(f"Jogos novos processados: {repo['jogos_novos_processados']}")
-    print(f"\nEquipas com Elo atualizado (amostra):")
-    for t in ["Benfica", "Porto", "Sporting", "Barcelona", "Real Madrid", "Arsenal"]:
-        if t in repo["elo_atual"]:
-            print(f"  {t}: {repo['elo_atual'][t]:.1f}")
+def predict_match_matrix(model, elo_home, elo_away, max_goals=8):
+    """Igual ao predict_match, mas devolve a matriz de marcadores completa
+    (usada pela simulação Monte Carlo em standings.py)."""
+    diff = (elo_home - elo_away) / 100.0
+    mu_h = model.predict(pd.DataFrame({"elo_diff": [diff], "is_home": [1]}))[0]
+    mu_a = model.predict(pd.DataFrame({"elo_diff": [-diff], "is_home": [0]}))[0]
+    return score_matrix(mu_h, mu_a, max_goals=max_goals, rho=RHO_DEFAULT)
