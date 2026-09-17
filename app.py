@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import html as html_lib
 from pathlib import Path
 
 from repository_engine import build_repository, get_poisson_model, predict_match, COMPETITIONS, csv_name_to_dataset
@@ -20,6 +21,56 @@ COMP_LABELS = {
 }
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures_csv"
+
+
+def match_card_html(home, away, date_str, elo_h, elo_a, mu_h, mu_a, home_p, draw_p, away_p, result=None):
+    """Cartão de jogo estilo 'app de apostas': crachás com iniciais, chips de
+    Elo/xG e as 3 caixas de probabilidade com a mais provável realçada a azul."""
+    home_esc, away_esc = html_lib.escape(home), html_lib.escape(away)
+    probs = [("home", home_p, home_esc), ("draw", draw_p, "Empate"), ("away", away_p, away_esc)]
+    max_key = max(probs, key=lambda t: t[1])[0]
+
+    def box(key, pct, label):
+        hi = key == max_key
+        border = "#3b82f6" if hi else "#262a37"
+        color = "#60a5fa" if hi else "#e5e7eb"
+        return (
+            f'<div style="flex:1;text-align:center;background:#161923;border:2px solid {border};'
+            f'border-radius:10px;padding:14px 6px;">'
+            f'<div style="font-size:22px;font-weight:800;color:{color};">{pct*100:.1f}%</div>'
+            f'<div style="font-size:12px;color:#8b8f9c;margin-top:2px;">{label}</div></div>'
+        )
+
+    boxes_html = "".join(box(k, p, l) for k, p, l in probs)
+
+    result_html = ""
+    if result is not None:
+        result_html = (
+            '<div style="margin-top:12px;background:#0f2e1c;color:#4ade80;border-radius:8px;'
+            f'padding:8px 12px;font-size:14px;">✅ Resultado final: {result}</div>'
+        )
+
+    return f"""
+<div style="background:#12141c;border:1px solid #262a37;border-radius:14px;padding:16px 18px;margin-bottom:14px;">
+  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+    <div style="width:28px;height:28px;border-radius:50%;background:#2563eb;color:white;display:flex;
+                align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0;">{home_esc[:1].upper()}</div>
+    <span style="font-weight:700;font-size:17px;">{home_esc}</span>
+    <span style="color:#8b8f9c;">vs</span>
+    <div style="width:28px;height:28px;border-radius:50%;background:#db2777;color:white;display:flex;
+                align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0;">{away_esc[:1].upper()}</div>
+    <span style="font-weight:700;font-size:17px;">{away_esc}</span>
+  </div>
+  <div style="color:#8b8f9c;font-size:13px;margin:4px 0 10px 0;">{html_lib.escape(str(date_str))}</div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">
+    <span style="background:#1c2030;border-radius:20px;padding:4px 12px;font-size:13px;color:#c7cad1;">Elo {elo_h:.0f}</span>
+    <span style="background:#1c2030;border-radius:20px;padding:4px 12px;font-size:13px;color:#c7cad1;">Elo {elo_a:.0f}</span>
+    <span style="background:#1c2030;border-radius:20px;padding:4px 12px;font-size:13px;color:#c7cad1;">🌐 xG médio: {mu_h:.2f} - {mu_a:.2f}</span>
+  </div>
+  <div style="display:flex;gap:10px;">{boxes_html}</div>
+  {result_html}
+</div>
+"""
 
 
 @st.cache_resource(show_spinner="A processar 238.854 jogos históricos + 8 CSVs...")
@@ -67,16 +118,17 @@ with tab_jornada:
             eh = repo["elo_atual"].get(csv_name_to_dataset(comp, row["Home Team"]), 1500.0)
             ea = repo["elo_atual"].get(csv_name_to_dataset(comp, row["Away Team"]), 1500.0)
             pred = predict_match(model, eh, ea)
-            c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
-            with c1:
-                st.markdown(f"**{row['Home Team']}** vs **{row['Away Team']}**")
-                st.caption(f"Elo: {eh:.0f} vs {ea:.0f} · xG: {pred['mu_h']:.2f} - {pred['mu_a']:.2f}")
-            c2.metric("Casa", f"{pred['home_win']*100:.1f}%")
-            c3.metric("Empate", f"{pred['draw']*100:.1f}%")
-            c4.metric("Fora", f"{pred['away_win']*100:.1f}%")
+            result = None
             if pd.notna(row["HomeGoals"]):
-                st.success(f"✅ Resultado final: {int(row['HomeGoals'])} - {int(row['AwayGoals'])}")
-            st.divider()
+                result = f"{int(row['HomeGoals'])} - {int(row['AwayGoals'])}"
+            st.markdown(
+                match_card_html(
+                    row["Home Team"], row["Away Team"], row["Date"], eh, ea,
+                    pred["mu_h"], pred["mu_a"], pred["home_win"], pred["draw"], pred["away_win"],
+                    result=result,
+                ),
+                unsafe_allow_html=True,
+            )
 
 # ---------------------------------------------------------------- CLASSIFICAÇÃO
 with tab_classificacao:
