@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from pathlib import Path
 
-from repository_engine import build_repository, get_poisson_model, predict_match, COMPETITIONS
+from repository_engine import build_repository, get_poisson_model, predict_match, COMPETITIONS, csv_name_to_dataset
 from standings import load_season_fixtures, compute_standings, simulate_season
 
 st.set_page_config(page_title="JustElo — Repositório", layout="wide")
@@ -47,35 +47,35 @@ st.divider()
 
 comp = st.selectbox("Competição", COMPETITIONS, format_func=lambda c: COMP_LABELS.get(c, c))
 
-tab_jornada, tab_classificacao, tab_simulacao, tab_upload = st.tabs(
-    ["📅 Previsões por jornada", "🏆 Classificação atual", "🎲 Simulação Monte Carlo", "⬆️ Atualizar CSVs"]
+tab_jornada, tab_classificacao, tab_simulacao, tab_valor, tab_upload = st.tabs(
+    ["📅 Previsões por jornada", "🏆 Classificação atual", "🎲 Simulação Monte Carlo", "💰 Value Betting", "⬆️ Atualizar CSVs"]
 )
 
 # ---------------------------------------------------------------- JORNADA
 with tab_jornada:
-    df_jogos = pd.DataFrame(repo["detalhe_jogos"])
-    df_comp = df_jogos[df_jogos["comp"] == comp].copy()
-
-    if df_comp.empty:
-        st.warning("Sem jogos processados para esta competição.")
+    season_df = load_season_fixtures(comp)
+    if season_df.empty:
+        st.warning("Sem jogos para esta competição.")
     else:
-        rounds = sorted(df_comp["round"].unique())
+        rounds = sorted(season_df["Round Number"].unique())
         round_sel = st.selectbox("Jornada", rounds, index=0)
-        df_round = df_comp[df_comp["round"] == round_sel].sort_values("date")
+        df_round = season_df[season_df["Round Number"] == round_sel].sort_values("Date")
 
         st.subheader(f"{COMP_LABELS.get(comp, comp)} — Jornada {round_sel}")
 
         for _, row in df_round.iterrows():
-            pred = predict_match(model, row["elo_home_pre"], row["elo_away_pre"])
+            eh = repo["elo_atual"].get(csv_name_to_dataset(comp, row["Home Team"]), 1500.0)
+            ea = repo["elo_atual"].get(csv_name_to_dataset(comp, row["Away Team"]), 1500.0)
+            pred = predict_match(model, eh, ea)
             c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
             with c1:
-                st.markdown(f"**{row['home']}** vs **{row['away']}**")
-                st.caption(f"Elo: {row['elo_home_pre']:.0f} vs {row['elo_away_pre']:.0f} · xG: {pred['mu_h']:.2f} - {pred['mu_a']:.2f}")
+                st.markdown(f"**{row['Home Team']}** vs **{row['Away Team']}**")
+                st.caption(f"Elo: {eh:.0f} vs {ea:.0f} · xG: {pred['mu_h']:.2f} - {pred['mu_a']:.2f}")
             c2.metric("Casa", f"{pred['home_win']*100:.1f}%")
             c3.metric("Empate", f"{pred['draw']*100:.1f}%")
             c4.metric("Fora", f"{pred['away_win']*100:.1f}%")
-            if isinstance(row["result"], str) and "-" in str(row["result"]):
-                st.success(f"✅ Resultado final: {row['result']}")
+            if pd.notna(row["HomeGoals"]):
+                st.success(f"✅ Resultado final: {int(row['HomeGoals'])} - {int(row['AwayGoals'])}")
             st.divider()
 
 # ---------------------------------------------------------------- CLASSIFICAÇÃO
@@ -101,6 +101,63 @@ with tab_simulacao:
         with st.spinner(f"A correr {n_sims:,} simulações..."):
             sim = simulate_season(comp, repo["elo_atual"], model, n_sims=int(n_sims))
         st.dataframe(sim, use_container_width=True, hide_index=False)
+
+# ---------------------------------------------------------------- VALUE BETTING
+with tab_valor:
+    st.subheader(f"Value Betting — {COMP_LABELS.get(comp, comp)}")
+    st.caption(
+        "Insere as odds (decimais) que vês na tua casa de apostas para cada resultado. "
+        "Comparamos com a probabilidade do nosso modelo, já sem a margem da casa (overround), "
+        "e mostramos o valor esperado (EV) de apostar segundo o TEU modelo. "
+        "EV positivo não é garantia de ganhar essa aposta — é uma vantagem estatística ao longo de muitas apostas."
+    )
+    season_df_v = load_season_fixtures(comp)
+    rounds_v = sorted(season_df_v["Round Number"].unique())
+    round_v = st.selectbox("Jornada", rounds_v, index=0, key="jornada_valor")
+    df_round_v = season_df_v[season_df_v["Round Number"] == round_v].sort_values("Date")
+    df_round_v = df_round_v[df_round_v["HomeGoals"].isna()]  # só faz sentido apostar em jogos por disputar
+
+    if df_round_v.empty:
+        st.info("Todos os jogos desta jornada já têm resultado — nada para apostar aqui.")
+    else:
+        for i, row in df_round_v.iterrows():
+            eh = repo["elo_atual"].get(csv_name_to_dataset(comp, row["Home Team"]), 1500.0)
+            ea = repo["elo_atual"].get(csv_name_to_dataset(comp, row["Away Team"]), 1500.0)
+            pred = predict_match(model, eh, ea)
+
+            st.markdown(f"**{row['Home Team']}** vs **{row['Away Team']}**")
+            c1, c2, c3 = st.columns(3)
+            odds_in = {}
+            model_p = {"Casa": pred["home_win"], "Empate": pred["draw"], "Fora": pred["away_win"]}
+            for col, label in zip((c1, c2, c3), ("Casa", "Empate", "Fora")):
+                with col:
+                    st.caption(f"{label} · modelo: {model_p[label]*100:.1f}%")
+                    odds_in[label] = st.number_input(
+                        f"Odd {label}", min_value=1.0, value=1.0, step=0.01,
+                        key=f"odd_{comp}_{round_v}_{i}_{label}", label_visibility="collapsed",
+                    )
+
+            entered = {k: v for k, v in odds_in.items() if v > 1.0}
+            if len(entered) == 3:
+                raw_implied = {k: 1.0 / v for k, v in odds_in.items()}
+                overround = sum(raw_implied.values())
+                fair_implied = {k: raw_implied[k] / overround for k in raw_implied}
+                c1, c2, c3 = st.columns(3)
+                for col, label in zip((c1, c2, c3), ("Casa", "Empate", "Fora")):
+                    with col:
+                        ev = model_p[label] * odds_in[label] - 1
+                        edge = model_p[label] - fair_implied[label]
+                        texto = f"Odd justa: {1/model_p[label]:.2f} · Edge: {edge*100:+.1f}pp · EV: {ev*100:+.1f}%"
+                        if ev > 0.02:
+                            st.success(texto)
+                        elif ev < -0.02:
+                            st.error(texto)
+                        else:
+                            st.caption(texto)
+                st.caption(f"Margem da casa (overround) nesta jornada: {(overround-1)*100:.1f}%")
+            else:
+                st.caption("Preenche as 3 odds para ver o edge e o valor esperado (EV).")
+            st.divider()
 
 # ---------------------------------------------------------------- UPLOAD DE CSVs
 with tab_upload:
